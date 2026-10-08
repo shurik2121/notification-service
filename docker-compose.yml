@@ -1,0 +1,90 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: notification
+      POSTGRES_USER: notification
+      POSTGRES_PASSWORD: notification
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notification -d notification"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+psycopg://notification:notification@postgres:5432/notification
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+psycopg://notification:notification@postgres:5432/notification
+      REDIS_URL: redis://redis:6379/0
+      USE_FAKE_PROVIDER: "true"
+      MAX_DELIVERY_RETRIES: "3"
+      RETRY_BACKOFF_BASE_SECONDS: "2"
+      PROCESSING_TIMEOUT_SECONDS: "300"
+      OUTBOX_BATCH_SIZE: "100"
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: celery -A app.celery_app.celery_app worker --loglevel=INFO --concurrency=4
+    environment:
+      DATABASE_URL: postgresql+psycopg://notification:notification@postgres:5432/notification
+      REDIS_URL: redis://redis:6379/0
+      USE_FAKE_PROVIDER: "true"
+      MAX_DELIVERY_RETRIES: "3"
+      RETRY_BACKOFF_BASE_SECONDS: "2"
+      PROCESSING_TIMEOUT_SECONDS: "300"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  beat:
+    build: .
+    command: celery -A app.celery_app.celery_app beat --loglevel=INFO
+    environment:
+      DATABASE_URL: postgresql+psycopg://notification:notification@postgres:5432/notification
+      REDIS_URL: redis://redis:6379/0
+      OUTBOX_BATCH_SIZE: "100"
+      OUTBOX_PUBLISH_INTERVAL_SECONDS: "1"
+      REAPER_INTERVAL_SECONDS: "30"
+      PROCESSING_TIMEOUT_SECONDS: "300"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
